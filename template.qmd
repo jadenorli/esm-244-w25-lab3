@@ -1,32 +1,48 @@
 ---
-title: "Lab 3 Key"
-author: "Nathaniel Grimes"
+title: "ESM 244 Lab Three"
+author: "Jaden Orli"
 format: html
 ---
-## Load in data and packages
+
+# 1. Load Packages
 
 ```{r}
+#load in the necessary libraries
 library(tidyverse)
 library(tidymodels)
 library(here)
+library(glmnet)
 
-t_df<-read_csv(here("data", "titanic_survival.csv"))
+#read in the titanic survival data 
+t_df <- read_csv(here("data", "titanic_survival.csv"))
+
 ```
 
 
-## ML Framework
+# 2. Background
 
-Write a description of how you go about applying machine learning problems. If you drew a diagram, share with a neighbor and discuss.
+## a) Machine Learning Framework
 
+Write a description of how you go about applying machine learning problems. If you drew a diagram, share with a neighbor and discuss (notes from key)
 
+Process:
+  1. Synthesize a Research Question
+  2. Data Exploration/Cleaning
+  3. Split Data
+  4. Build Models
+    a. Data Preprocessing
+    b. Train Model
+    c. Tune
+    d. Performance Evaluation 
+    e. Model Selection
+  5. Finalize Model
+  6. Interpret and Visualize Results
 
-
-## Tidymodels Overview
+## b) Tidymodels Overview
 
 The creators of `tidyverse` have created a new package called `tidymodels` that is designed to make machine learning more accessible to R users. The package is designed to work with the `tidyverse` and `tidydata` principles. 
 
-
-## Defining a Research Question
+## c) Defining a Research Question
 
 What are we trying to solve? The crucial step of any scientist that can take years to define and perfect.
 
@@ -37,233 +53,458 @@ How will go about solving our question? Use a classification algorithm to predic
 In real life, we would have to go out and collect the data. Today, we will use the `titanic` dataset from the `titanic` package. 
 
 
-## Data Exploration/Cleaning
+# 3. Data Exploration/Cleaning
 
 Take 15 minutes to explore the data. Are there any immediate changes to the data that we need to change? What relationships can you see through graphs? What variables could be of interest to predict survival of passengers on the Titanic?
 
+## a) Data Cleaning
+
+```{r}
+#clean the titanic data (t_df)
+surv_df <- t_df %>%
+  mutate(survived = factor(survived),   #categorical outcome variables need to be factors
+         pclass = factor(pclass)) %>% #turn some predictors to factor
+  select(-cabin, -ticket) #lots of NAs here - and not likely to be very helpful
+
+```
 
 
-## Data Split
+## b) Data Visualization
+
+### i) Survival by Class 
+
+```{r}
+#explore the proportion of passengers that didn't survive to those that did survive for each class 
+ggplot(surv_df, aes(x = pclass, fill = survived)) +
+  geom_bar() +
+  labs(title = "Survival Proportion by Passenger Class",
+       x = "Passenger Class",
+       y = "Count of Passengers",
+       fill = "Survived") +
+  scale_fill_discrete(labels = c("Deceased", "Survived"))
+
+```
+
+
+### ii) Survival by Age Group 
+
+```{r}
+#visualization of proportion that survived vs died for each age 
+ggplot(surv_df, aes(x = age, fill = survived)) +
+  geom_histogram() +
+  labs(title = "Survival Proportion by Passenger Class",
+       x = "Age",
+       y = "Count of Passengers",
+       fill = "Survived") +
+  scale_fill_discrete(labels = c("Deceased", "Survived"))
+
+```
+
+
+# 4. Data Split
 
 We will set aside (“partition”) a portion of the data for building and comparing our models (80%), and a portion for testing our models after we’ve selected the best one (20%). NOT the same as folds - that will happen in the training/validation step.
 
+## a) Check Total Data Proportions
+
 ```{r}
-### Check balance of survived column
-surv_df %>%
-  group_by(survived) %>%
-  summarize(n = n()) %>%
+#check balance of survived column
+split_df <- surv_df %>%
+  group_by(survived) %>% #group the data by the survived column
+  summarize(n = n()) %>% #determine the number of entries
   ungroup() %>%
-  mutate(prop = n / sum(n))
+  mutate(prop = n / sum(n)) #calculate the proportion of passengers that survived and that
+
+#examine the results
+split_df
+
 ```
 
+
+## b) Split the Data
 
 Tidymodels will split the data and label it for us.
 
 ```{r}
+#set the seed for reproducibility 
 set.seed(123)
 
-surv_split <- initial_split(surv_df, prop = 0.80,strata = survived)
-  ### stratified on `survived`; training and test splits will both have ~60/40% survived = 0/1
+#split the data so that 80% will go to the training/building the model and 20% for testing
+surv_split <- initial_split(surv_df, 
+                            prop = 0.80, #80% training data
+                            strata = survived) #stratified on `survived`; training and test splits will both have ~60/40% survived = 0/1
+
+#create the training dataframe from the split 
 surv_train_df <- training(surv_split)
+
+#create the testing dataframe from the split 
 surv_test_df <- testing(surv_split)
 
 ```
 
+
+## c) Check Split Data Proportions
+
 Check to make sure the data has the same proportion of splits. Why is it important to maintain the same proportion of splits?
 
+It is important to maintain the same proportion of splits because the training data and testing data should both be representative of the entire dataset. 
+  - this is important to ensure that the model is generalizable to the population 
+  - if the test data is skewed, than the model might not reflect real world performance
+  - if it was split randomly, then there might be a bias in the split 
+
 ```{r}
-surv_train_df %>%
+#check the proportions of the training data to ensure it represents the total data
+train_split <- surv_train_df %>%
   group_by(survived) %>%
   summarize(n = n()) %>%
   ungroup() %>%
   mutate(prop = n / sum(n))
 
-surv_test_df %>%
+#check the proportions of the testing data to ensure it represents the total data
+test_split <- surv_test_df %>%
   group_by(survived) %>%
   summarize(n = n()) %>%
   ungroup() %>%
   mutate(prop = n / sum(n))
+
+#print the outputs 
+train_split
+test_split
+
 ```
 
 
-
-## Model Building
+# 5. Model Building
 
 Constructing models in `tidymodels` is frighteningly simple. We tell R which kind of algorithm we want to build (model), what package the algorithm should come from (engine), and how to construct it.
 
-```{r}
-log_md <- logistic_reg() %>%
-  set_engine("glm")
+## a) Model Construction
 
-lasso_md<- logistic_reg(penalty = 0.037,mixture=1) %>%
-  set_engine("glmnet")
+We will build two logistic regression models since we have binary data. 
+
+### i) Standard Logistic Regression Model
+
+The first model is a standard regression model. We will fit the model with a generalized linear model (glm). This will fit a logistic regression model using maximum likelihood estimation (MLE)
+
+```{r}
+#construct a standard logistic regression model
+log_md <- logistic_reg() %>% #call the logistic regression algorithm
+  set_engine("glm") #set the engine to be a generalized linear model
+
 ```
 
-### Data Preprocessing
 
-We use receipes to convert our data into the format best suited to our chosen models. Basically we tell R to *consistently* transform our data between all training and testing sets. [This prevents data leakage and ensures that our models are trained on the same data](https://en.wikipedia.org/wiki/Leakage_(machine_learning)). 
+### ii) Pure Lasso Regression Model
+
+The second model is a lasso-penalized regression model. This model has a regularization strength (λ) that is defined by the penalty value. 
+
+  - Higher values of penalty will shrink coefficients more strongly toward zero, reducing overfitting
+  - Lower values will allow the model to fit the data more flexibly
+  
+Secondly the mixture is used to define the regression. These values range from 0 to 1
+
+  - mixture = 1: pure lasso (L1 regularization), which forces some coefficients to be exactly zero
+  - mixture = 0: pure ridge (L2 regularization), which shrinks coefficients but does not set them to zero
+  
+values between 0 and 1 indicate elastic net, which is a mix of L1 and L2
+
+```{r}
+#construct a pure lasso logistic regression model 
+lasso_md <- logistic_reg(penalty = 0.037, #this is the regularization strength (λ)
+                         mixture = 1) %>% #make this a pure lasso model 
+  set_engine("glmnet") #model used for fitting these models
+
+```
+
+
+## b) Data Preprocessing
+
+We use recipes to convert our data into the format best suited to our chosen models. Basically we tell R to *consistently* transform our data between all training and testing sets. [This prevents data leakage and ensures that our models are trained on the same data](https://en.wikipedia.org/wiki/Leakage_(machine_learning)). 
 
 We're going to build two models: a logistic regression and a lasso logistic regression model. 
 
+## i) Standard Logistic Regression Model
+
+In this step we will define a preprocessing pipeline for the standard logistic regression model:
+
+  - we will use only sex and pclass (passenger class) as predictor variables
+  - survived is the outcome variable (binary classification: 0 = died, 1 = survived)
+
 ```{r}
-glm_rec<-recipe(survived ~ sex + pclass, data = surv_train_df)
-
-# steps we need to do to prepare data for lasso
-
-lasso_rec<-recipe(survived~.,data=surv_train_df) %>%
-  update_role(passenger_id, new_role = "ID") %>%
-  step_rm(name,age) %>%
-  step_unknown(all_nominal(),-all_outcomes()) |> 
-  step_dummy(all_nominal(),-all_outcomes()) |>
-  step_zv(all_numeric(),-all_outcomes()) |> 
-  step_normalize(all_numeric(),-all_outcomes())
+#define the recipe/formula for the standard logistic regression model
+glm_rec <- recipe(survived ~ sex + pclass, data = surv_train_df)
 
 ```
 
 
-### Train Model
+## ii) Lasso Regression Model
 
-First we create a workflow that combines all the models and the receipes to control the data. Then we use that consistent pattern to fit our model. First let's compare the models one time. Add comments to the following code chunk to describe what each step is doing. Feel free to run code.
 
 ```{r}
-# First the logistic regression
+#steps we need to do to prepare data for lasso
+lasso_rec <- recipe(survived~.,data = surv_train_df) %>% #define the recipe using all variables as explanatory variables 
+  update_role(passenger_id, new_role = "ID") %>% #exclude the passenger_id since the is an identifier and not a predictor variable
+  step_rm(name, age) %>% #remove the name and age variables since we don't want to use them 
+  step_unknown(all_nominal(), -all_outcomes()) %>%  #converts unseen categorical values in new data to "unknown", preventing errors
+  step_dummy(all_nominal(), -all_outcomes()) %>% #converts categorical variables (e.g., sex, pclass) into numerical dummy variables
+  step_zv(all_numeric(), -all_outcomes()) %>% #eliminates predictors that have zero variance (e.g., a column where all values are the same)
+  step_normalize(all_numeric(), -all_outcomes()) #normalizes numerical variables to have mean = 0 and standard deviation = 1; helps Lasso properly shrink coefficients
 
+```
+
+
+## c) Train Model
+
+First we create a workflow that combines all the models and the recipes to control the data. Then we use that consistent pattern to fit our model. First let's compare the models one time. Add comments to the following code chunk to describe what each step is doing. Feel free to run code.
+
+## i) Standard Logistic Regression Model
+
+```{r}
+#create a workflow to bundle the recipe (data transformation) and the model
 log_wf <- workflow() %>%
-  add_recipe(glm_rec) %>%
-  add_model(log_md) 
+  add_recipe(glm_rec) %>% #add the pre-processing data from the recipe
+  add_model(log_md)  #add the standard logistic regression model
 
-log_fit<-log_wf %>%
-  fit(surv_train_df)
+#fit the standard logistic regression model
+log_fit <- log_wf %>%
+  fit(surv_train_df) #train the model with the training data
 
-log_test<-surv_test_df |>
-  mutate(predict(log_fit, new_data = surv_test_df)) |> 
-  mutate(predict(log_fit,new_data = surv_test_df, type='prob'))
+#make predictions
+log_test <- surv_test_df %>% 
+  mutate(predict(log_fit, new_data = surv_test_df)) %>% #predict survived (1) or not (0)
+  mutate(predict(log_fit,new_data = surv_test_df, type='prob')) #use probabilities
 
+#compare actual vs. predicted survival status 
 table(log_test$survived, log_test$.pred_class)
 
 ```
 
 
+## ii) Lasso Regression Model
+
 Now fill in the following code chunk to fit the lasso model. Create a table (or sometimes called a confusion matrix) that shows the predicted values versus the actual values.
 
 
 ```{r}
+#create a workflow to bundle the recipe (data transformation) and the model
+lasso_wf <- workflow() %>%
+  add_recipe(lasso_rec) %>%
+  add_model(lasso_md)
 
+#fit the lasso logistic regression model
+lasso_fit <- lasso_wf %>%
+  fit(surv_train_df)
+
+#make predictions
+lasso_test <- surv_test_df |>
+  mutate(predict(lasso_fit, new_data = surv_test_df)) |> 
+  mutate(predict(lasso_fit, new_data = surv_test_df, type = 'prob'))
+
+#evaluate performance
+table(lasso_test$survived, lasso_test$.pred_class)
 
 ```
 
-### Evaluate Performance
+# 6. Evaluate Performance
+
+## a) Measure Accuracy
 
 Measure the accuracy using the `accuracy` function from the `yardstick` package for each model.
 
-```{r}
-log_test |> 
-  accuracy(truth = survived, estimate = .pred_class)
-
-lasso_test |>
-  accuracy(truth = survived, estimate = .pred_class)
-```
-
-
-Calculate the `ROC AUC` for each model. Use the `roc_auc` function from yardstick.
+### i) Standard Logistic Regression Model
 
 ```{r}
+#evaluate the models prediction accuracy 
+log_test %>% 
+  accuracy(truth = survived, #the actual survival status
+           estimate = .pred_class) #the predicted survival status
 
 ```
 
 
-### Model Selection
+### ii) Lasso Regression Model
+
+```{r}
+#evaluate the models prediction accuracy
+lasso_test %>% 
+  accuracy(truth = survived, #the actual survival status
+           estimate = .pred_class) #the predicted survival status
+
+```
+
+
+## b) Calculate ROC AUC
+
+Calculate the `ROC AUC` (Receiver Operating Characteristic - Area Under the Curve) for each model. Use the `roc_auc` function from yardstick.
+
+AUC (Area Under Curve) ranges from 0 to 1:
+  - 1.0 = Perfect classifier.
+  - 0.5 = No better than random guessing.
+  - < 0.5 = Worse than random guessing (rare).
+
+It measures the model's ability to rank positive cases (survived = 1) higher than negative cases (survived = 0).
+
+### i) Standard Logistic Regression Model
+
+```{r}
+#calculate area under curve - 50% is random guessing, 100% is perfect classifier
+log_test %>%  
+  yardstick::roc_auc(truth = survived, .pred_0)
+
+```
+
+
+### ii) Lasso Regression Model
+
+```{r}
+#calculate area under curve - 50% is random guessing, 100% is perfect classifier
+lasso_test %>%  
+  yardstick::roc_auc(truth = survived, .pred_0)
+
+```
+
+
+# 7. Model Selection
 
 One run of the model is not enough to determine which model is better. We need to run the model multiple times to determine which model is better. We can use cross-validation to determine which model is better. Instead of for loops or purrr, tidymodels as built in functions to do this for us. 
 
+## a) 10 Fold Cross Validation
+
+```{r}
+#set the seed for reproducibility
+set.seed(12)
+
+#perform a 10-fold cross validation 
+folds <- vfold_cv(surv_train_df, 
+                  v = 10, #split the data into 90% training and 10% testing data
+                  strata = survived) #make sure the survival proportions are balanced
+```
+
+
+## b) Fit the Model
+
+### i) Standard Logistic Regression Model
 
 
 ```{r}
-set.seed(12)
+#fit the model
+log_fit_folds<- log_fit %>% 
+  fit_resamples(folds) ##fits logistic regression across 10 different train-test splits
 
-folds<-vfold_cv(surv_train_df, v=10, strata = survived)
-
-log_fit_folds<- log_fit |> 
-  fit_resamples(folds)
-
+#gather accuracy, ROC AUC, and other evaluation metrics
 collect_metrics(log_fit_folds)
 
-lasso_res<-lasso_wf %>%
+```
+
+
+### ii) Lasso Regression Model
+
+```{r}
+#fit the model
+lasso_res <- lasso_wf %>%
   fit_resamples(folds)
 
+#gather accuracy, ROC AUC, and other evaluation metrics
 collect_metrics(lasso_res)
+
 ```
+
 
 Which model do we choose?
 
 Let's look at the actual models to get a better understanding.
 
+
+## c) Extract Model Parameters
+
+### i) Linear Logistic Regression
+
 ```{r}
-log_fit |> 
-  extract_fit_parsnip()|> 
+#extract the parameters 
+log_fit %>% 
+  extract_fit_parsnip() %>% #extracts the fitted model parameters
   tidy()
 
-lasso_fit |>
-  extract_fit_parsnip() |> 
-  tidy()
 ```
+
+
+### ii) Lasso Regression 
+
+```{r}
+#extract the parameters
+lasso_fit %>% 
+  extract_fit_parsnip() %>%  
+  tidy()
+
+```
+
 Lasso set many of the parameters to zero. How do you interpret this model? Why would you want to use as opposed to simple logistic regression?
 
-### Finalize Model
+# 8. Finalize Model
 
 We will finalize the model by fitting the model to the entire dataset. 
 
 ```{r}
-final_log<-log_wf |>
-  last_fit(surv_split)
+#now that we have selected the lasso model as the best, we will train it on all the data
+final_log <- log_wf %>% 
+  last_fit(surv_split) #train the model on all data
+
 ```
 
 
-## Interpret and Visualize Results
+# 9. Interpret and Visualize Results
 
 Everything is stored in a `workflow` object. We can extract the coefficients from the logistic regression model using `extract_fit_parsnip`. The `tidy` function will make the output more readable. Describe the coefficients and what they mean. Create a clean table of the model output.
 
 ```{r}
-
-final_log |>
-  extract_fit_parsnip() |>
-  tidy() |> 
-  mutate(odds=exp(estimate),
-         prob=odds/(1+estimate))
+#extract the final model parameters
+final_log %>% 
+  extract_fit_parsnip() %>% 
+  tidy() %>% 
+  mutate(odds = exp(estimate), #convert the log-odds to odds
+         prob = odds/(1 + estimate)) #convert the odds to probabilities
 ```
 
 Please give this a go on your own with the post-lab exercise. I will be walking around to assist.
 
 
-## Tuning example
+# 10. Tuning example
 
 This just shows how to hypertune the `glmnet` penalty parameter. We'll cover more when we get to random forests with Yutian.
 
 ```{r}
+#set seed for reproducibility
 set.seed(123)
 
-lambda_grid <- grid_regular(penalty(), levels = 50)
+#create a grid of 50 different lambda penalty values
+lambda_grid <- grid_regular(penalty(), 
+                            levels = 50)
 
-lasso_md_tune<- logistic_reg(penalty = tune(),mixture=1) %>%
+lasso_md_tune<- logistic_reg(penalty = tune(), #allow hyperparamter tuning 
+                             mixture = 1) %>% #ensures pure lasso regression
   set_engine("glmnet")
 
-lasso_wf<-workflow() %>%
+#add the tunable model to the workflow 
+lasso_wf <- workflow() %>%
   add_model(lasso_md_tune) %>%
   add_recipe(lasso_rec)
 
-
+#set a new seed
 set.seed(2020)
-lasso_grid <- tune_grid(
-  lasso_wf,
-  resamples = folds,
-  grid = lambda_grid
-)
 
+#use cross validation to test different penalty values
+lasso_grid <- tune_grid(lasso_wf,
+                        resamples = folds,
+                        grid = lambda_grid)
+
+#collect performance metrics
 lasso_grid %>%
   collect_metrics()
 
+#identify the best penalty value using ROC AUC as the metric (highest ROC AUC is best)
 lowest_rmse <- lasso_grid %>%
-  select_best(metric="roc_auc") #use this metric
+  select_best(metric = "roc_auc") #use this metric
+
 ```
 
 
